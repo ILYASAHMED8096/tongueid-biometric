@@ -1,0 +1,19 @@
+# never push biometric images
+data/
+models/
+
+# python
+__pycache__/
+*.pyc
+
+# env
+.venv/
+.env
+
+# notebooks
+.ipynb_checkpoints/
+
+# saved artifacts
+*.pkl
+*.joblib
+*.onnx
