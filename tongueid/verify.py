@@ -3,6 +3,7 @@ from pathlib import Path
 import argparse
 import numpy as np
 import cv2
+from sklearn.preprocessing import StandardScaler
 
 from tongueid.features import extract_features
 from tongueid.metrics import cosine_similarity, find_eer
@@ -14,15 +15,9 @@ def iter_images(folder: Path):
 
 
 def load_user_features(data_root: Path) -> dict[str, np.ndarray]:
-    """
-    data_root/
-      person_01/*.png
-      person_02/*.png
-    Returns dict label -> feature matrix (n_samples, d)
-    """
     users = {}
     for d in sorted(data_root.iterdir()):
-        if not d.is_dir():
+        if not d.is_dir() or not d.name.startswith("person_"):
             continue
         feats = []
         for img_path in iter_images(d):
@@ -33,63 +28,78 @@ def load_user_features(data_root: Path) -> dict[str, np.ndarray]:
         if feats:
             users[d.name] = np.vstack(feats)
     if not users:
-        raise RuntimeError(f"No user folders with images found in {data_root}")
+        raise RuntimeError(f"No users found under: {data_root}")
     return users
 
 
-def template_from_features(X: np.ndarray) -> np.ndarray:
-    # average template (simple & effective baseline)
-    return X.mean(axis=0)
+def l2norm(x: np.ndarray) -> np.ndarray:
+    return x / (np.linalg.norm(x) + 1e-12)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", type=str, default="data/processed", help="processed dataset root with person_XX folders")
-    ap.add_argument("--per_user_probe", type=int, default=5, help="probe samples per user for evaluation")
+    ap.add_argument("--data", type=str, default="data/processed")
+    ap.add_argument("--per_user_probe", type=int, default=5)
     args = ap.parse_args()
 
     data_root = Path(args.data)
     users = load_user_features(data_root)
-
+    labels = sorted(users.keys())
     rng = np.random.default_rng(42)
+
+    # Build enroll/probe splits first
+    splits = {}
+    enroll_all = []
+    for label in labels:
+        X = users[label]
+        n = X.shape[0]
+        if n < args.per_user_probe + 5:
+            continue
+        idx = rng.permutation(n)
+        probe_idx = idx[:args.per_user_probe]
+        enroll_idx = idx[args.per_user_probe:]
+        splits[label] = (enroll_idx, probe_idx)
+        enroll_all.append(X[enroll_idx])
+
+    if not splits:
+        raise RuntimeError("Not enough data per user. Increase SAMPLES_PER_USER or reduce per_user_probe.")
+
+    enroll_all = np.vstack(enroll_all)
+
+    # ✅ Fit a global scaler using ALL enrollment data (this is the main fix)
+    scaler = StandardScaler()
+    scaler.fit(enroll_all)
 
     genuine_scores = []
     impostor_scores = []
 
-    labels = sorted(users.keys())
-
-    for label in labels:
+    for label in sorted(splits.keys()):
         X = users[label]
-        n = X.shape[0]
-        if n < args.per_user_probe + 2:
-            # need enough samples to split into template + probes
-            continue
+        enroll_idx, probe_idx = splits[label]
 
-        idx = rng.permutation(n)
-        probe_idx = idx[:args.per_user_probe]
-        enroll_idx = idx[args.per_user_probe:]
+        # Transform and build template in standardized space
+        X_enroll = scaler.transform(X[enroll_idx])
+        template = X_enroll.mean(axis=0)
+        template = l2norm(template)
 
-        template = template_from_features(X[enroll_idx])
-
-        # genuine: probes from same user
+        # Genuine probes
         for i in probe_idx:
-            score = cosine_similarity(X[i], template)
-            genuine_scores.append(score)
+            x_probe = scaler.transform(X[i:i+1]).squeeze(0)
+            x_probe = l2norm(x_probe)
+            genuine_scores.append(cosine_similarity(x_probe, template))
 
-        # impostor: sample probes from other users against this template
-        other_labels = [l for l in labels if l != label]
-        rng.shuffle(other_labels)
-        for other in other_labels[: min(5, len(other_labels))]:
-            Xo = users[other]
-            j = int(rng.integers(0, Xo.shape[0]))
-            score = cosine_similarity(Xo[j], template)
-            impostor_scores.append(score)
+        # Impostor probes (from other users)
+        other = [l for l in splits.keys() if l != label]
+        rng.shuffle(other)
+        for l2 in other[:min(10, len(other))]:
+            X2 = users[l2]
+            j = int(rng.integers(0, X2.shape[0]))
+            x_imp = scaler.transform(X2[j:j+1]).squeeze(0)
+            x_imp = l2norm(x_imp)
+            impostor_scores.append(cosine_similarity(x_imp, template))
 
     genuine_scores = np.array(genuine_scores, dtype=np.float32)
     impostor_scores = np.array(impostor_scores, dtype=np.float32)
-
-    if len(genuine_scores) == 0 or len(impostor_scores) == 0:
-        raise RuntimeError("Not enough data to compute verification metrics. Increase samples or users.")
 
     eer, thr, diff = find_eer(genuine_scores, impostor_scores)
 
