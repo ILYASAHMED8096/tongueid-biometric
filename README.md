@@ -137,3 +137,15 @@ Open VS Code terminal in your project folder and run:
 ### Step 1 — See what will be committed
 ```powershell
 git status
+## Verification ROC
+Generate ROC plot:
+```bash
+python scripts/make_roc_report.py
+Output: reports/figures/verification_roc.png
+
+Then commit it:
+
+```powershell
+git add README.md
+git commit -m "docs: add ROC generation instructions"
+git push
