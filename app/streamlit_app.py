@@ -254,8 +254,20 @@ with tab_enroll:
 st.subheader("Existing enrolled users")
 rows = list_users()
 if rows:
+    q = st.text_input("Search (by Unique Key or Username)", key="search_users").strip().lower()
+
     table_rows = [{"Unique Key": r[0], "Username": r[1], "Created At": r[2]} for r in rows]
-    st.table(table_rows)
+
+    if q:
+        table_rows = [
+            row for row in table_rows
+            if q in row["Unique Key"].lower() or q in row["Username"].lower()
+        ]
+
+    if table_rows:
+        st.table(table_rows)
+    else:
+        st.info("No users match your search.")
 else:
     st.info("No users enrolled yet.")
 
