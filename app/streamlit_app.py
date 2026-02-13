@@ -82,9 +82,9 @@ def get_user(unique_key: str) -> Optional[Tuple[str, bytes, bytes, str]]:
         return row if row else None
 
 
-def list_users() -> List[Tuple[str, str]]:
+def list_users() -> List[Tuple[str, str, str]]:
     with db_connect() as con:
-        cur = con.execute("SELECT unique_key, username FROM users ORDER BY created_at DESC")
+        cur = con.execute("SELECT unique_key, username, created_at FROM users ORDER BY created_at DESC")
         return cur.fetchall()
 
 
@@ -251,12 +251,13 @@ with tab_enroll:
             st.success(f"User created ✅  Saved {saved} image(s) to {ENROLL_ROOT / uk}")
 
     st.markdown("---")
-    st.subheader("Existing enrolled users")
-    rows = list_users()
-    if rows:
-        st.write([{ "unique_key": r[0], "username": r[1]} for r in rows])
-    else:
-        st.info("No users enrolled yet.")
+st.subheader("Existing enrolled users")
+rows = list_users()
+if rows:
+    table_rows = [{"Unique Key": r[0], "Username": r[1], "Created At": r[2]} for r in rows]
+    st.table(table_rows)
+else:
+    st.info("No users enrolled yet.")
 
 
 with tab_verify:
