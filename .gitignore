@@ -20,3 +20,6 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+*.egg-info/
+dist/
+build/
