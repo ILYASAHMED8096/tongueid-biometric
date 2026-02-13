@@ -156,6 +156,15 @@ def read_uploaded_file(uploaded) -> Optional[np.ndarray]:
     file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
     return cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
+def read_camera_image(camera_file) -> Optional[np.ndarray]:
+    """
+    streamlit.camera_input returns an UploadedFile-like object (bytes).
+    We decode it into an OpenCV BGR image.
+    """
+    if camera_file is None:
+        return None
+    file_bytes = np.asarray(bytearray(camera_file.getvalue()), dtype=np.uint8)
+    return cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
 def l2norm(x: np.ndarray) -> np.ndarray:
     return x / (np.linalg.norm(x) + 1e-12)
@@ -393,10 +402,12 @@ if role == "admin":
 
     default_thr = 0.90 if mode == "Deep (ResNet18)" else 0.25
     threshold = st.slider("Threshold", 0.0, 1.0, float(default_thr), 0.01, key="admin_threshold")
-    uploaded = st.file_uploader("Upload probe image", type=["png", "jpg", "jpeg", "bmp", "webp"], key="admin_probe")
+    st.markdown("### Probe Image Input")
+    cam = st.camera_input("Capture using camera", key="user_camera")
+    uploaded = st.file_uploader("Or upload probe image", type=["png", "jpg", "jpeg", "bmp", "webp"], key="user_probe")
 
     if st.button("Verify as Admin", key="btn_admin_verify"):
-        img = read_uploaded_file(uploaded)
+        img = read_camera_image(cam) if cam is not None else read_uploaded_file(uploaded)
         if img is None:
             st.error("Upload a valid probe image.")
             st.stop()
@@ -424,12 +435,14 @@ else:
     mode = st.selectbox("Comparison Mode", ["Deep (ResNet18)", "Handcrafted (scaled)"], key="user_mode")
     default_thr = 0.90 if mode == "Deep (ResNet18)" else 0.25
     threshold = st.slider("Threshold (accept if score ≥ threshold)", 0.0, 1.0, float(default_thr), 0.01, key="user_threshold")
-    uploaded = st.file_uploader("Upload probe image", type=["png", "jpg", "jpeg", "bmp", "webp"], key="user_probe")
+    st.markdown("### Probe Image Input")
+    cam = st.camera_input("Capture using camera", key="admin_camera")
+    uploaded = st.file_uploader("Or upload probe image", type=["png", "jpg", "jpeg", "bmp", "webp"], key="admin_probe")
 
     if st.button("Verify", key="btn_user_verify"):
         uk = st.session_state["unique_key"]
 
-        img = read_uploaded_file(uploaded)
+        img = read_camera_image(cam) if cam is not None else read_uploaded_file(uploaded)
         if img is None:
             st.error("Upload a valid probe image.")
             st.stop()
