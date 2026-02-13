@@ -46,8 +46,7 @@ def main():
     labels = sorted(users.keys())
     rng = np.random.default_rng(42)
 
-    genuine_scores = []
-    impostor_scores = []
+    genuine_scores, impostor_scores = [], []
 
     for label in labels:
         X = users[label]
@@ -61,11 +60,9 @@ def main():
         template = X[enroll_idx].mean(axis=0)
         template = template / (np.linalg.norm(template) + 1e-12)
 
-        # genuine
         for i in probe_idx:
             genuine_scores.append(cosine_similarity(X[i], template))
 
-        # impostor
         other = [l for l in labels if l != label]
         rng.shuffle(other)
         for l2 in other[:min(10, len(other))]:
@@ -96,6 +93,7 @@ def main():
     plt.legend(loc="lower right")
     plt.grid(True)
     plt.savefig(OUT_PNG, dpi=150, bbox_inches="tight")
+
     print(f"Saved deep ROC plot -> {OUT_PNG.resolve()}")
     print(f"EER (deep): {eer*100:.2f}%  threshold={thr:.3f}")
 
