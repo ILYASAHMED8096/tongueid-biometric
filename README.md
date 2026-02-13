@@ -1,151 +1,160 @@
 # TongueID Biometric (Python)
 
-TongueID is a Python-based biometric prototype using **tongue-print** imagery.  
-It builds an end-to-end pipeline for **tongue ROI extraction**, **feature engineering**, and **ML-based classification**, with a public dataset workflow.
+TongueID is a **tongue-print biometric prototype** built in Python. It demonstrates an end-to-end pipeline using a **public tongue segmentation dataset workflow**:
 
-> ⚠️ This repository does **not** include biometric image data.  
-> Place datasets locally under `data/` (ignored by git).
+- Tongue ROI extraction using segmentation masks (crop to the tongue region)
+- Feature engineering (color + texture + quality)
+- ML baseline training (SVM identification)
+- Biometric verification evaluation (cosine similarity + FAR/FRR + EER)
+- ROC curve reporting (handcrafted + deep embeddings)
+- Streamlit demo for interactive verification
 
----
-
-## What This Project Does
-
-### 1) Tongue ROI Extraction (Segmentation → Crop)
-- Uses tongue segmentation masks (public dataset) to crop a clean **Region of Interest (ROI)**.
-- Saves ROI images for downstream modeling.
-
-### 2) Feature Engineering
-Extracts handcrafted features from ROI:
-- **Color**: HSV histogram
-- **Texture**: LBP (Local Binary Patterns), GLCM properties
-- **Quality**: blur score (Laplacian variance)
-
-### 3) ML Baseline (Identification Prototype)
-- Trains an **SVM** classifier on engineered features.
-- Prints confusion matrix + classification report.
-- Saves the trained model locally (ignored by git).
+> ⚠️ This repository does **not** store or publish biometric images.  
+> Put datasets locally under `data/` (gitignored).
 
 ---
 
-## Dataset Notes (Public-Only Workflow)
-
-Many public tongue datasets provide **segmentation masks** but not person identity labels.
-To demonstrate an identification/verification-style pipeline without private images, this project supports a **pseudo-enrollment** setup:
-
-- Create ROI images from (image + mask)
-- Generate multiple augmented “captures” per ROI image
-- Treat each ROI source image as a pseudo “person” class
+## Tech Stack
+- Python 3.10+
+- OpenCV, NumPy
+- scikit-image (LBP, GLCM)
+- scikit-learn (SVM, ROC/AUC)
+- Streamlit (demo)
+- PyTorch + TorchVision (ResNet deep embeddings baseline)
 
 ---
 
 ## Project Structure
 
-ongueid-biometric/
-tongueid/ # core pipeline (features + training)
-scripts/ # dataset preparation scripts
+tongueid-biometric/
+tongueid/ # core pipeline (features, training, verification, deep embeddings)
+scripts/ # dataset preparation + ROC scripts
+app/ # Streamlit demo
 notebooks/ # experiments (optional)
-app/ # Streamlit app (optional)
+reports/
+figures/ # ROC plots
 data/ # ignored (datasets go here)
 models/ # ignored (trained models saved here)
-reports/ # metrics / notes (optional)
 README.md
 requirements.txt
 .gitignore
+pyproject.toml
 
-## Setup
 
-### 1) Create venv & install
+---
+
+## Setup (Windows PowerShell)
+
 ```bash
 python -m venv .venv
-# Windows PowerShell
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-## Setup
+If you are adding deep embeddings:
 
-### 1) Create venv & install
-```bash
-python -m venv .venv
-# Windows PowerShell
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-) Create pseudo-ID dataset (public-only biometric demo)
+pip install torch torchvision
+pip freeze > requirements.txt
+Dataset Workflow (Public-Only)
+Most public tongue datasets provide segmentation masks but do not provide person-identity labels for true biometric identification.
+
+This project supports:
+
+ROI extraction from (image + mask)
+
+A pseudo-enrollment dataset for public-only demonstration:
+
+Choose N ROI images
+
+Generate multiple augmented “captures” per ROI image
+
+Treat each ROI source image as a pseudo “person” class
+
+Note: Pseudo-enrollment can inflate performance versus real multi-session biometric data.
+
+How to Run
+A) Place dataset locally (ignored by git)
+Recommended local layout:
+
+data/seg/images/   # tongue images
+data/seg/masks/    # segmentation masks (binary masks)
+B) Make ROI crops (mask → tongue ROI)
+python scripts/make_roi_from_masks.py
+Output:
+
+data/processed/biohit_roi/
+C) Create pseudo-ID dataset (public-only biometric demo)
 python scripts/make_pseudo_id_dataset.py
-
-
-This writes:
+Output (example):
 
 data/processed/person_01/
 data/processed/person_02/
 ...
-
-D) Train SVM baseline
+D) Train SVM baseline (Identification)
 python -m tongueid.train --data data/processed --out models/svm.joblib
-Results (Baseline)
-
-After training, the script prints:
+This prints:
 
 Confusion matrix
 
-Precision / Recall / F1 per class
+Precision/Recall/F1 per class
+Model saved locally to models/ (gitignored).
 
-Next planned additions: ROC/AUC + FAR/FRR + EER (verification-style evaluation)
+Verification (Biometric Evaluation)
+Handcrafted verification (engineered features)
+python -m tongueid.verify --data data/processed
+Latest run (pseudo-ID dataset):
+
+Genuine mean ≈ 0.9982
+
+Impostor mean ≈ 0.9977
+
+Approx EER ≈ 41.94% @ threshold ≈ 0.9999
+
+Interpretation:
+
+Handcrafted features are not separating classes well under this setup (genuine/impostor scores overlap).
+
+ROC Reports
+Handcrafted ROC plot
+python scripts/make_roc_report.py
+Output:
+
+reports/figures/verification_roc.png
+
+Deep embeddings ROC plot (ResNet18)
+python scripts/make_roc_report_deep.py
+Output:
+
+reports/figures/verification_roc_deep.png
+
+Example deep baseline result (pseudo-ID setup):
+
+AUC = 1.000
+
+EER = 0.00% (can be inflated due to pseudo-enrollment)
+
+Streamlit Demo (Enroll + Verify)
+Run:
+
+streamlit run app/streamlit_app.py
+The app:
+
+selects a claimed identity (person_XX)
+
+computes cosine similarity between probe and user template
+
+accepts/rejects based on threshold
 
 Privacy & Ethics
+This repo does NOT include biometric images.
 
-No biometric images are stored in this repo.
-
-Keep all datasets in data/ locally (gitignored).
+Keep datasets under data/ locally (gitignored).
 
 Use public datasets according to their licensing terms.
-Roadmap
 
-Add verification mode (cosine similarity + threshold)
+Roadmap / Next Improvements
+Add a stricter evaluation split: enroll/ vs probe/ folders per user
 
-Add ROC/AUC + FAR/FRR + EER metrics
+Add stronger augmentations to reduce “easy” pseudo-ID leakage
 
-Add Streamlit enroll/verify demo
+Add Streamlit toggle: Handcrafted vs Deep embeddings
 
-✅ Save `README.md`.
-
----
-
-# 2) Check your `.gitignore` (super important before pushing)
-Open `.gitignore` and ensure it includes at least:
-
-✅ Save `README.md`.
-
----
-
-# 2) Check your `.gitignore` (super important before pushing)
-Open `.gitignore` and ensure it includes at least:
-data/
-models/
-.venv/
-pycache/
-.ipynb_checkpoints/
-*.joblib
-*.pkl
-
-If any are missing, add them and save.
-
----
-
-# 3) Now push to GitHub (safe way)
-
-Open VS Code terminal in your project folder and run:
-
-### Step 1 — See what will be committed
-```powershell
-git status
-## Verification ROC
-Generate ROC plot:
-```bash
-python scripts/make_roc_report.py
-Output: reports/figures/verification_roc.png
-
-Then commit it:
-
-```powershell
-git add README.md
-git commit -m "docs: add ROC generation instructions"
-git push
+Add PCA + whitening for embeddings and compare EER
