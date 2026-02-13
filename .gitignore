@@ -17,3 +17,6 @@ __pycache__/
 *.pkl
 *.joblib
 *.onnx
+*.egg-info/
+dist/
+build/
