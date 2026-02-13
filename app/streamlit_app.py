@@ -24,16 +24,15 @@ ENROLL_ROOT = Path("data/enrolled")
 DB_PATH = ENROLL_ROOT / "users.db"
 ENROLL_ROOT.mkdir(parents=True, exist_ok=True)
 
-
 # -------------------------
-# Admin credentials
-# Recommended: set env vars before running:
+# Admin credentials (set via env vars ideally)
+# PowerShell:
 #   setx TONGUEID_ADMIN_KEY "admin"
 #   setx TONGUEID_ADMIN_PASSWORD "StrongPassword123"
-# Then restart terminal.
+# Restart terminal after setx
 # -------------------------
 ADMIN_KEY = os.getenv("TONGUEID_ADMIN_KEY", "admin")
-ADMIN_PASSWORD = os.getenv("TONGUEID_ADMIN_PASSWORD", "admin123")  # change via env for real use
+ADMIN_PASSWORD = os.getenv("TONGUEID_ADMIN_PASSWORD", "admin123")
 
 
 # -------------------------
@@ -53,7 +52,6 @@ def verify_password(password: str, salt: bytes, expected_hash: bytes) -> bool:
 
 # -------------------------
 # Database helpers
-# (includes migration to add "role" column if missing)
 # -------------------------
 def db_connect():
     con = sqlite3.connect(DB_PATH)
@@ -70,7 +68,7 @@ def db_connect():
         """
     )
 
-    # ---- migration: add role if DB existed without it
+    # migration: add role column if missing in old DB
     cols = [r[1] for r in con.execute("PRAGMA table_info(users);").fetchall()]
     if "role" not in cols:
         con.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';")
@@ -111,16 +109,10 @@ def list_users() -> List[Tuple[str, str, str, str]]:
 
 
 def ensure_admin_account():
-    """
-    Create admin account in DB if it doesn't exist.
-    Admin user is identified by ADMIN_KEY and has role='admin'.
-    """
     if user_exists(ADMIN_KEY):
-        # If exists, ensure role is admin (in case of old DB)
         with db_connect() as con:
             con.execute("UPDATE users SET role='admin' WHERE unique_key = ?", (ADMIN_KEY,))
         return
-
     create_user(ADMIN_KEY, "Master Admin", ADMIN_PASSWORD, role="admin")
 
 
@@ -137,7 +129,23 @@ def save_uploaded_images(unique_key: str, files) -> int:
         img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
         if img is None:
             continue
-        out_path = user_dir / f"{int(time.time() * 1000)}_{saved}.png"
+        out_path = user_dir / f"{int(time.time() * 1000)}_upload_{saved}.png"
+        cv2.imwrite(str(out_path), img)
+        saved += 1
+    return saved
+
+
+def save_images_from_bytes(unique_key: str, images_bytes: list[bytes], tag: str = "cam") -> int:
+    user_dir = ENROLL_ROOT / unique_key
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = 0
+    for b in images_bytes:
+        arr = np.asarray(bytearray(b), dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        out_path = user_dir / f"{int(time.time() * 1000)}_{tag}_{saved}.png"
         cv2.imwrite(str(out_path), img)
         saved += 1
     return saved
@@ -156,15 +164,13 @@ def read_uploaded_file(uploaded) -> Optional[np.ndarray]:
     file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
     return cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
+
 def read_camera_image(camera_file) -> Optional[np.ndarray]:
-    """
-    streamlit.camera_input returns an UploadedFile-like object (bytes).
-    We decode it into an OpenCV BGR image.
-    """
     if camera_file is None:
         return None
     file_bytes = np.asarray(bytearray(camera_file.getvalue()), dtype=np.uint8)
     return cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
 
 def l2norm(x: np.ndarray) -> np.ndarray:
     return x / (np.linalg.norm(x) + 1e-12)
@@ -181,7 +187,6 @@ def get_embedder():
 def build_global_scaler_for_enrolled() -> StandardScaler:
     feats = []
     for unique_key, _username, _created, _role in list_users():
-        # Skip admin images (admin usually has none)
         if unique_key == ADMIN_KEY:
             continue
         user_dir = ENROLL_ROOT / unique_key
@@ -219,7 +224,6 @@ def build_template(unique_key: str, mode: str, scaler: Optional[StandardScaler] 
         X = np.vstack(embs)
         return l2norm(X.mean(axis=0))
 
-    # Handcrafted (scaled)
     if scaler is None:
         scaler = build_global_scaler_for_enrolled()
 
@@ -254,7 +258,8 @@ def login(unique_key: str, password: str) -> bool:
     user = get_user(unique_key)
     if not user:
         return False
-    username, salt, pw_hash, created_at, role = user
+
+    username, salt, pw_hash, _created_at, role = user
     if not verify_password(password, salt, pw_hash):
         return False
 
@@ -273,6 +278,27 @@ def logout():
 
 
 # -------------------------
+# Session state for cameras
+# -------------------------
+def init_camera_states():
+    # Enrollment camera
+    if "enroll_cam_open" not in st.session_state:
+        st.session_state["enroll_cam_open"] = False
+    if "enroll_captures" not in st.session_state:
+        st.session_state["enroll_captures"] = []  # list[bytes]
+    if "enroll_last_cam_hash" not in st.session_state:
+        st.session_state["enroll_last_cam_hash"] = None
+
+    # User verify camera
+    if "user_cam_open" not in st.session_state:
+        st.session_state["user_cam_open"] = False
+
+    # Admin verify camera
+    if "admin_cam_open" not in st.session_state:
+        st.session_state["admin_cam_open"] = False
+
+
+# -------------------------
 # UI
 # -------------------------
 st.set_page_config(page_title="TongueID Login + Verify", layout="centered")
@@ -280,16 +306,18 @@ st.title("TongueID — Login, Enroll & Verify (Local Demo)")
 st.caption("All data stored locally in data/enrolled (gitignored).")
 
 ensure_admin_account()
+init_camera_states()
 
-# init session state
 if "logged_in" not in st.session_state:
     logout()
 
-# Top right logout
+# Top bar logout
 if st.session_state["logged_in"]:
     cols = st.columns([3, 1])
     with cols[0]:
-        st.success(f"Logged in as **{st.session_state['username']}** (`{st.session_state['unique_key']}`) — role: **{st.session_state['role']}**")
+        st.success(
+            f"Logged in as **{st.session_state['username']}** (`{st.session_state['unique_key']}`) — role: **{st.session_state['role']}**"
+        )
     with cols[1]:
         if st.button("Logout", key="btn_logout"):
             logout()
@@ -297,7 +325,7 @@ if st.session_state["logged_in"]:
 
 
 # -------------------------
-# Landing page: Login / Register
+# Landing: Login / Register
 # -------------------------
 if not st.session_state["logged_in"]:
     tab_login, tab_register = st.tabs(["🔐 Login", "🧾 Register (Enroll)"])
@@ -316,17 +344,15 @@ if not st.session_state["logged_in"]:
             else:
                 st.error("Invalid unique key or password.")
 
-        st.markdown("---")
-        st.info(
-            f"Admin login (default): unique key = `{ADMIN_KEY}` and password = `{ADMIN_PASSWORD}`.\n\n"
-            "⚠️ Change admin password using environment variables for real use."
-        )
-
     with tab_register:
         st.subheader("Register / Enroll")
 
         username = st.text_input("Username (display name)", key="enroll_username")
-        unique_key = st.text_input("Unique Key (must be unique)", key="enroll_unique_key", help="Example: ilyas01 or user_123")
+        unique_key = st.text_input(
+            "Unique Key (must be unique)",
+            key="enroll_unique_key",
+            help="Example: ilyas01 or user_123",
+        )
         password = st.text_input("Password", type="password", key="enroll_password")
         password2 = st.text_input("Confirm Password", type="password", key="enroll_password2")
 
@@ -334,9 +360,45 @@ if not st.session_state["logged_in"]:
             "Upload tongue images (PNG/JPG). You can upload multiple images.",
             key="enroll_images",
             type=["png", "jpg", "jpeg", "bmp", "webp"],
-            accept_multiple_files=True
+            accept_multiple_files=True,
         )
 
+        # ---- Camera Enrollment (button-controlled; NOT rendered until open)
+        st.markdown("### Camera Enrollment (optional)")
+
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c1:
+            if st.button("Open Camera", key="btn_enroll_open_cam"):
+                st.session_state["enroll_cam_open"] = True
+        with c2:
+            if st.button("Close Camera", key="btn_enroll_close_cam"):
+                st.session_state["enroll_cam_open"] = False
+        with c3:
+            if st.button("Clear Captures", key="btn_enroll_clear_caps"):
+                st.session_state["enroll_captures"] = []
+                st.session_state["enroll_last_cam_hash"] = None
+                st.rerun()
+
+        cam_slot = st.empty()
+        cam_file = None
+
+        if st.session_state["enroll_cam_open"]:
+            with cam_slot.container():
+                cam_file = st.camera_input("Capture an enrollment image", key="enroll_camera")
+        else:
+            cam_slot.empty()
+
+        # store new capture bytes only once
+        if cam_file is not None:
+            b = cam_file.getvalue()
+            h = hashlib.sha256(b).hexdigest()
+            if st.session_state["enroll_last_cam_hash"] != h:
+                st.session_state["enroll_captures"].append(b)
+                st.session_state["enroll_last_cam_hash"] = h
+
+        st.write(f"Captured images: **{len(st.session_state['enroll_captures'])}**")
+
+        # ---- Create user
         if st.button("Create Account + Save Images", key="btn_enroll"):
             uk = unique_key.strip()
             un = username.strip()
@@ -355,61 +417,84 @@ if not st.session_state["logged_in"]:
                 st.error("Password must be at least 6 characters.")
             elif password != password2:
                 st.error("Passwords do not match.")
-            elif not files or len(files) < 2:
-                st.error("Please upload at least 2 images for enrollment.")
+            elif (not files or len(files) == 0) and len(st.session_state["enroll_captures"]) < 2:
+                st.error("Please provide at least 2 enrollment images (upload or camera).")
             else:
                 create_user(uk, un, password, role="user")
-                saved = save_uploaded_images(uk, files)
-                st.success(f"User created ✅  Saved {saved} image(s) to {ENROLL_ROOT / uk}")
+
+                saved_upload = save_uploaded_images(uk, files) if files else 0
+                saved_cam = 0
+                if st.session_state["enroll_captures"]:
+                    saved_cam = save_images_from_bytes(uk, st.session_state["enroll_captures"], tag="cam")
+                    st.session_state["enroll_captures"] = []
+                    st.session_state["enroll_last_cam_hash"] = None
+
+                st.success(f"User created ✅ Saved {saved_upload} uploaded + {saved_cam} camera image(s).")
 
     st.stop()
 
 
 # -------------------------
-# After login: pages based on role
+# After login: admin vs user
 # -------------------------
 role = st.session_state["role"]
 
 if role == "admin":
-    # Admin dashboard
     st.header("🛡️ Admin Dashboard")
 
     st.subheader("All enrolled users")
-    rows = [r for r in list_users()]  # (unique_key, username, created_at, role)
-
+    rows = list_users()
     q = st.text_input("Search (Unique Key or Username)", key="admin_search").strip().lower()
+
     table_rows = []
     for uk, un, created, r in rows:
         if q and (q not in uk.lower() and q not in un.lower()):
             continue
         table_rows.append({"Unique Key": uk, "Username": un, "Created At": created, "Role": r})
 
-    if table_rows:
-        st.table(table_rows)
-    else:
-        st.info("No users match your search.")
+    st.table(table_rows) if table_rows else st.info("No users match your search.")
 
     st.markdown("---")
     st.subheader("Verify any user (admin)")
-    # Exclude admin account from verify dropdown
+
     user_choices = [r[0] for r in rows if r[0] != ADMIN_KEY and r[3] == "user"]
     if not user_choices:
         st.warning("No normal users enrolled yet.")
         st.stop()
 
-    selected_user = st.selectbox("Select user to verify", user_choices, key="admin_selected_user")
+    selected_user = st.selectbox("Select user", user_choices, key="admin_selected_user")
     mode = st.selectbox("Comparison Mode", ["Deep (ResNet18)", "Handcrafted (scaled)"], key="admin_mode")
 
     default_thr = 0.90 if mode == "Deep (ResNet18)" else 0.25
     threshold = st.slider("Threshold", 0.0, 1.0, float(default_thr), 0.01, key="admin_threshold")
-    st.markdown("### Probe Image Input")
-    cam = st.camera_input("Capture using camera", key="user_camera")
-    uploaded = st.file_uploader("Or upload probe image", type=["png", "jpg", "jpeg", "bmp", "webp"], key="user_probe")
+
+    st.markdown("### Probe Image Input (admin)")
+    a1, a2 = st.columns(2)
+    with a1:
+        if st.button("Open Camera", key="btn_admin_open_cam"):
+            st.session_state["admin_cam_open"] = True
+    with a2:
+        if st.button("Close Camera", key="btn_admin_close_cam"):
+            st.session_state["admin_cam_open"] = False
+
+    admin_cam_slot = st.empty()
+    admin_cam_file = None
+    if st.session_state["admin_cam_open"]:
+        with admin_cam_slot.container():
+            admin_cam_file = st.camera_input("Capture probe (admin)", key="admin_camera")
+    else:
+        admin_cam_slot.empty()
+
+    admin_uploaded = st.file_uploader(
+        "Or upload probe image (admin)",
+        type=["png", "jpg", "jpeg", "bmp", "webp"],
+        key="admin_probe_upload",
+    )
 
     if st.button("Verify as Admin", key="btn_admin_verify"):
-        img = read_camera_image(cam) if cam is not None else read_uploaded_file(uploaded)
+        img = read_camera_image(admin_cam_file) if admin_cam_file is not None else read_uploaded_file(admin_uploaded)
         if img is None:
-            st.error("Upload a valid probe image.")
+            st.error("Provide a probe image (camera or upload).")
             st.stop()
 
         st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Probe image", use_container_width=True)
@@ -428,23 +513,42 @@ if role == "admin":
         st.write(f"**Decision:** {decision}")
 
 else:
-    # Normal user verify page
     st.header("✅ Verify (Logged-in User)")
     st.write(f"You are verifying for **{st.session_state['username']}** (`{st.session_state['unique_key']}`)")
 
     mode = st.selectbox("Comparison Mode", ["Deep (ResNet18)", "Handcrafted (scaled)"], key="user_mode")
     default_thr = 0.90 if mode == "Deep (ResNet18)" else 0.25
-    threshold = st.slider("Threshold (accept if score ≥ threshold)", 0.0, 1.0, float(default_thr), 0.01, key="user_threshold")
-    st.markdown("### Probe Image Input")
-    cam = st.camera_input("Capture using camera", key="admin_camera")
-    uploaded = st.file_uploader("Or upload probe image", type=["png", "jpg", "jpeg", "bmp", "webp"], key="admin_probe")
+    threshold = st.slider("Threshold", 0.0, 1.0, float(default_thr), 0.01, key="user_threshold")
+
+    st.markdown("### Probe Image Input (user)")
+    u1, u2 = st.columns(2)
+    with u1:
+        if st.button("Open Camera", key="btn_user_open_cam"):
+            st.session_state["user_cam_open"] = True
+    with u2:
+        if st.button("Close Camera", key="btn_user_close_cam"):
+            st.session_state["user_cam_open"] = False
+
+    user_cam_slot = st.empty()
+    user_cam_file = None
+    if st.session_state["user_cam_open"]:
+        with user_cam_slot.container():
+            user_cam_file = st.camera_input("Capture probe (user)", key="user_camera")
+    else:
+        user_cam_slot.empty()
+
+    user_uploaded = st.file_uploader(
+        "Or upload probe image (user)",
+        type=["png", "jpg", "jpeg", "bmp", "webp"],
+        key="user_probe_upload",
+    )
 
     if st.button("Verify", key="btn_user_verify"):
         uk = st.session_state["unique_key"]
 
-        img = read_camera_image(cam) if cam is not None else read_uploaded_file(uploaded)
+        img = read_camera_image(user_cam_file) if user_cam_file is not None else read_uploaded_file(user_uploaded)
         if img is None:
-            st.error("Upload a valid probe image.")
+            st.error("Provide a probe image (camera or upload).")
             st.stop()
 
         st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Probe image", use_container_width=True)
@@ -458,6 +562,5 @@ else:
 
         st.subheader("Result")
         st.write(f"**Mode:** {mode}")
-        st.write(f"**Similarity score:** `{score:.4f}`")
-        st.write(f"**Threshold:** `{threshold:.2f}`")
+        st.write(f"**Score:** `{score:.4f}`  |  **Threshold:** `{threshold:.2f}`")
         st.write(f"**Decision:** {decision}")
