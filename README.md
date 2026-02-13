@@ -111,7 +111,9 @@ Approx EER ≈ 41.94% @ threshold ≈ 0.9999
 Interpretation:
 
 Handcrafted features are not separating classes well under this setup (genuine/impostor scores overlap).
+Handcrafted (scaled): EER ≈ 8.67% @ thr ≈ 0.239
 
+Deep embeddings: EER ≈ 0.00% @ thr ≈ 0.965 (pseudo-ID setup)
 ROC Reports
 Handcrafted ROC plot
 python scripts/make_roc_report.py
