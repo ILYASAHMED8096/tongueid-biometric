@@ -1,5 +1,13 @@
 # TongueID Biometric (Python)
+<p align="center">
+  <img src="assets/linguanet_logo.png" width="520" />
+</p>
 
+<h2 align="center">LinguaNet — A Neural Network-Based Tongue Biometric Recognition System</h2>
+
+<p align="center">
+A local Streamlit demo for enrolling users with tongue images and verifying identity using ML similarity matching.
+</p>
 TongueID is a **tongue-print biometric prototype** built in Python. It demonstrates an end-to-end pipeline using a **public tongue segmentation dataset workflow**:
 
 - Tongue ROI extraction using segmentation masks (crop to the tongue region)
