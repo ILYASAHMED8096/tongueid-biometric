@@ -9,15 +9,14 @@ import hmac
 import shutil
 from typing import Optional, Tuple, List
 import base64
+import secrets
+import smtplib
+from email.message import EmailMessage
 
 import numpy as np
 import cv2
 import streamlit as st
 from sklearn.preprocessing import StandardScaler
-
-import smtplib
-from email.message import EmailMessage
-import secrets
 
 from tongueid.metrics import cosine_similarity
 from tongueid.features import extract_features
@@ -39,16 +38,14 @@ def inject_ui_css():
         """
         <style>
         :root{
-            --leftw: 30vw;        /* left strip width */
-            --gap: 2rem;          /* inner padding */
-            --contentw: 920px;    /* centered content width */
+            --leftw: 30vw;
+            --gap: 2rem;
+            --contentw: 920px;
         }
 
-        /* Base */
         .stApp { background: #ffffff !important; }
         html, body { color: #0f172a !important; }
 
-        /* Left strip background */
         div[data-testid="stAppViewContainer"]::before{
             content:"";
             position: fixed;
@@ -61,7 +58,6 @@ def inject_ui_css():
             pointer-events: none;
         }
 
-        /* Left panel logo: centered + "realistic" look */
         .left-panel{
             position: fixed;
             top: 0;
@@ -70,38 +66,31 @@ def inject_ui_css():
             height: 100vh;
             z-index: 2;
             pointer-events: none;
-
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
         .left-panel img{
-            width: min(520px, 90%);     /* ✅ zoomed-in compared to before */
+            width: min(520px, 90%);
             height: auto;
-
             image-rendering: auto;
             transform: translateZ(0);
             filter:
                 drop-shadow(0 18px 45px rgba(15,23,42,0.18))
                 saturate(1.05)
                 contrast(1.05);
-
             border-radius: 18px;
             background: transparent;
         }
 
-        /* Main content container (Streamlit 1.54) */
         div[data-testid="stMainBlockContainer"]{
             position: relative;
             z-index: 1;
-
             padding-left: calc(var(--leftw) + var(--gap)) !important;
             padding-right: var(--gap) !important;
-
             padding-top: 2.2rem !important;
             padding-bottom: 2rem !important;
-
             max-width: none !important;
         }
 
@@ -112,15 +101,16 @@ def inject_ui_css():
 
         .soft-divider{
             height: 1px;
-            background: linear-gradient(90deg, transparent,
-                        rgba(34,197,94,0.25),
-                        rgba(124,58,237,0.25),
-                        rgba(236,72,153,0.25),
-                        transparent);
+            background: linear-gradient(
+                90deg, transparent,
+                rgba(34,197,94,0.25),
+                rgba(124,58,237,0.25),
+                rgba(236,72,153,0.25),
+                transparent
+            );
             margin: 12px 0 14px 0;
         }
 
-        /* Inputs */
         div[data-baseweb="input"] input,
         div[data-baseweb="textarea"] textarea{
             background: #ffffff !important;
@@ -130,7 +120,6 @@ def inject_ui_css():
             padding: 12px 12px !important;
         }
 
-        /* Buttons */
         .stButton > button{
             border-radius: 14px !important;
             border: 1px solid rgba(15,23,42,0.14) !important;
@@ -199,9 +188,7 @@ SMTP_PASS = os.getenv("TONGUEID_SMTP_PASS", "")
 
 def send_email(to_email: str, subject: str, body: str) -> None:
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
-        raise RuntimeError(
-            "SMTP env vars not set. Set TONGUEID_SMTP_HOST/USER/PASS (and PORT)."
-        )
+        raise RuntimeError("SMTP env vars not set. Set TONGUEID_SMTP_HOST/USER/PASS (and PORT).")
 
     msg = EmailMessage()
     msg["From"] = SMTP_USER
@@ -216,31 +203,37 @@ def send_email(to_email: str, subject: str, body: str) -> None:
 
 
 # =========================================================
-# 4) Password hashing (PBKDF2)
+# 4) Password hashing + time helpers
 # =========================================================
-def hash_password(
-    password: str, salt: bytes | None = None, iterations: int = 200_000
-) -> Tuple[bytes, bytes]:
+def hash_password(password: str, salt: bytes | None = None, iterations: int = 200_000) -> Tuple[bytes, bytes]:
     if salt is None:
         salt = os.urandom(16)
-    pw_hash = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt, iterations, dklen=32
-    )
+    pw_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
     return salt, pw_hash
 
 
 def verify_password(password: str, salt: bytes, expected_hash: bytes) -> bool:
-    test_hash = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt, 200_000, dklen=32
-    )
+    test_hash = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000, dklen=32)
     return hmac.compare_digest(test_hash, expected_hash)
 
 
+def _now_ts() -> int:
+    return int(time.time())
+
+
+def _parse_ts(s: Optional[str]) -> int:
+    try:
+        return int(s) if s else 0
+    except Exception:
+        return 0
+
+
 # =========================================================
-# 5) DB helpers (role + email + reset OTP columns)
+# 5) DB helpers (users + audit logs + lockouts + templates)
 # =========================================================
 def db_connect():
     con = sqlite3.connect(DB_PATH)
+
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -255,34 +248,77 @@ def db_connect():
             reset_code_hash BLOB,
             reset_code_salt BLOB,
             reset_expires_at TEXT,
-            reset_tries INTEGER NOT NULL DEFAULT 0
+            reset_tries INTEGER NOT NULL DEFAULT 0,
+
+            failed_login_count INTEGER NOT NULL DEFAULT 0,
+            lock_until_ts INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_key TEXT,
+            target_key TEXT,
+            details TEXT
+        );
+        """
+    )
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS templates (
+            unique_key TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            template BLOB NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (unique_key, mode)
         );
         """
     )
 
     cols = [r[1] for r in con.execute("PRAGMA table_info(users);").fetchall()]
 
-    def _add_col_if_missing(colname: str, ddl: str):
+    def _add(colname: str, ddl: str):
         if colname not in cols:
             con.execute(ddl)
 
-    _add_col_if_missing("role", "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';")
-    _add_col_if_missing("email", "ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT '';")
-    _add_col_if_missing("reset_code_hash", "ALTER TABLE users ADD COLUMN reset_code_hash BLOB;")
-    _add_col_if_missing("reset_code_salt", "ALTER TABLE users ADD COLUMN reset_code_salt BLOB;")
-    _add_col_if_missing("reset_expires_at", "ALTER TABLE users ADD COLUMN reset_expires_at TEXT;")
-    _add_col_if_missing("reset_tries", "ALTER TABLE users ADD COLUMN reset_tries INTEGER NOT NULL DEFAULT 0;")
+    _add("role", "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user';")
+    _add("email", "ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT '';")
+    _add("reset_code_hash", "ALTER TABLE users ADD COLUMN reset_code_hash BLOB;")
+    _add("reset_code_salt", "ALTER TABLE users ADD COLUMN reset_code_salt BLOB;")
+    _add("reset_expires_at", "ALTER TABLE users ADD COLUMN reset_expires_at TEXT;")
+    _add("reset_tries", "ALTER TABLE users ADD COLUMN reset_tries INTEGER NOT NULL DEFAULT 0;")
+    _add("failed_login_count", "ALTER TABLE users ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0;")
+    _add("lock_until_ts", "ALTER TABLE users ADD COLUMN lock_until_ts INTEGER NOT NULL DEFAULT 0;")
 
     return con
 
 
+def log_event(event_type: str, actor_key: str | None = None, target_key: str | None = None, details: str = "") -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    with db_connect() as con:
+        con.execute(
+            "INSERT INTO audit_logs(ts, event_type, actor_key, target_key, details) VALUES(?,?,?,?,?)",
+            (ts, event_type, actor_key, target_key, details),
+        )
+
+
+def get_audit_logs(limit: int = 200) -> list[tuple]:
+    with db_connect() as con:
+        return con.execute(
+            "SELECT ts, event_type, actor_key, target_key, details FROM audit_logs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+
 def user_exists(unique_key: str) -> bool:
     with db_connect() as con:
-        return (
-            con.execute("SELECT 1 FROM users WHERE unique_key = ?", (unique_key,))
-            .fetchone()
-            is not None
-        )
+        return con.execute("SELECT 1 FROM users WHERE unique_key = ?", (unique_key,)).fetchone() is not None
 
 
 def create_user(unique_key: str, username: str, email: str, password: str, role: str = "user") -> None:
@@ -302,12 +338,6 @@ def get_user(unique_key: str) -> Optional[Tuple[str, str, bytes, bytes, str, str
             (unique_key,),
         ).fetchone()
         return row if row else None
-
-
-def get_user_email(unique_key: str) -> str:
-    with db_connect() as con:
-        row = con.execute("SELECT email FROM users WHERE unique_key=?", (unique_key,)).fetchone()
-    return (row[0] if row else "") or ""
 
 
 def list_users() -> List[Tuple[str, str, str, str, str]]:
@@ -330,6 +360,7 @@ def delete_user(unique_key: str) -> None:
         raise ValueError("Admin account cannot be deleted.")
     with db_connect() as con:
         con.execute("DELETE FROM users WHERE unique_key = ?", (unique_key,))
+        con.execute("DELETE FROM templates WHERE unique_key = ?", (unique_key,))
     user_dir = ENROLL_ROOT / unique_key
     if user_dir.exists() and user_dir.is_dir():
         shutil.rmtree(user_dir, ignore_errors=True)
@@ -341,22 +372,95 @@ def set_user_password(unique_key: str, new_password: str) -> None:
         con.execute("UPDATE users SET salt=?, pw_hash=? WHERE unique_key=?", (salt, pw_hash, unique_key))
 
 
+# ---------- Lockout helpers ----------
+def is_locked(unique_key: str) -> tuple[bool, int]:
+    with db_connect() as con:
+        row = con.execute("SELECT lock_until_ts FROM users WHERE unique_key=?", (unique_key,)).fetchone()
+    if not row:
+        return False, 0
+    lock_until = int(row[0] or 0)
+    return (_now_ts() < lock_until), lock_until
+
+
+def format_lock_remaining(lock_until_ts: int) -> str:
+    remaining = max(0, int(lock_until_ts) - _now_ts())
+    mins = remaining // 60
+    secs = remaining % 60
+    return f"{mins} min {secs} sec" if mins > 0 else f"{secs} sec"
+
+
+def record_login_failure(unique_key: str) -> None:
+    with db_connect() as con:
+        row = con.execute("SELECT failed_login_count FROM users WHERE unique_key=?", (unique_key,)).fetchone()
+        count = int(row[0] or 0) + 1 if row else 1
+
+        lock_until = 0
+        if count >= 5:
+            lock_until = _now_ts() + 10 * 60  # 10 minutes
+            count = 0
+
+        con.execute(
+            "UPDATE users SET failed_login_count=?, lock_until_ts=? WHERE unique_key=?",
+            (count, lock_until, unique_key),
+        )
+
+
+def record_login_success(unique_key: str) -> None:
+    with db_connect() as con:
+        con.execute("UPDATE users SET failed_login_count=0, lock_until_ts=0 WHERE unique_key=?", (unique_key,))
+
+
 # =========================================================
-# 6) OTP Reset (4-digit code) helpers
+# 5b) Template storage helpers
 # =========================================================
-def _now_ts() -> int:
-    return int(time.time())
+def _np_to_blob(vec: np.ndarray) -> bytes:
+    return vec.astype(np.float32).tobytes()
 
 
-def _parse_ts(s: Optional[str]) -> int:
-    try:
-        return int(s) if s else 0
-    except Exception:
-        return 0
+def _blob_to_np(b: bytes) -> np.ndarray:
+    return np.frombuffer(b, dtype=np.float32)
 
 
+def save_template(unique_key: str, mode: str, vec: np.ndarray) -> None:
+    updated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    blob = _np_to_blob(vec)
+    with db_connect() as con:
+        con.execute(
+            """
+            INSERT INTO templates(unique_key, mode, template, updated_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(unique_key, mode) DO UPDATE SET
+              template=excluded.template,
+              updated_at=excluded.updated_at
+            """,
+            (unique_key, mode, blob, updated_at),
+        )
+
+
+def load_template(unique_key: str, mode: str) -> Optional[np.ndarray]:
+    with db_connect() as con:
+        row = con.execute(
+            "SELECT template FROM templates WHERE unique_key=? AND mode=?",
+            (unique_key, mode),
+        ).fetchone()
+    if not row:
+        return None
+    return _blob_to_np(row[0])
+
+
+def build_and_store_templates_for_user(unique_key: str) -> None:
+    deep_vec = build_template(unique_key, mode="Deep (ResNet18)")
+    save_template(unique_key, "Deep (ResNet18)", deep_vec)
+
+    scaler = build_global_scaler_for_enrolled()
+    hand_vec = build_template(unique_key, mode="Handcrafted (scaled)", scaler=scaler)
+    save_template(unique_key, "Handcrafted (scaled)", hand_vec)
+
+
+# =========================================================
+# 6) OTP Reset helpers
+# =========================================================
 def set_reset_code(unique_key: str, code: str, ttl_seconds: int = 600) -> None:
-    # store OTP hashed (never plaintext)
     salt, code_hash = hash_password(code)
     expires_at = str(_now_ts() + ttl_seconds)
     with db_connect() as con:
@@ -392,7 +496,6 @@ def verify_reset_code(unique_key: str, code: str) -> bool:
 
     ok = verify_password(code, code_salt, code_hash)
 
-    # count attempts (even successful one)
     with db_connect() as con:
         con.execute("UPDATE users SET reset_tries = reset_tries + 1 WHERE unique_key=?", (unique_key,))
 
@@ -412,7 +515,6 @@ def clear_reset_code(unique_key: str) -> None:
 
 
 def send_reset_code_flow(unique_key: str) -> bool:
-    """Generate + store OTP, then email it to user. Returns True on success."""
     user = get_user(unique_key)
     if not user:
         st.error("No user found with that Unique Key.")
@@ -437,8 +539,10 @@ def send_reset_code_flow(unique_key: str) -> bool:
                 f"- LinguaNet"
             ),
         )
+        log_event("RESET_CODE_SENT", actor_key=unique_key, target_key=unique_key, details="otp_sent")
         return True
     except Exception as e:
+        log_event("RESET_CODE_SEND_FAIL", actor_key=unique_key, target_key=unique_key, details=str(e))
         st.error(f"Email failed: {e}")
         return False
 
@@ -481,7 +585,7 @@ def l2norm(x: np.ndarray) -> np.ndarray:
 
 
 # =========================================================
-# 8) Feature/Embedding templates
+# 8) Feature/Embedding templates (vector builders)
 # =========================================================
 @st.cache_resource
 def get_embedder():
@@ -559,19 +663,38 @@ def extract_probe_vector(img_bgr: np.ndarray, mode: str, scaler: Optional[Standa
 # 9) Auth + session state
 # =========================================================
 def login(unique_key: str, password: str) -> bool:
-    user = get_user(unique_key)
+    uk = (unique_key or "").strip()
+    if not uk:
+        return False
+
+    locked, lock_until = is_locked(uk)
+    if locked:
+        rem = format_lock_remaining(lock_until)
+        log_event("LOGIN_BLOCKED_LOCKED", actor_key=uk, target_key=uk, details=f"locked_until={lock_until};remaining={rem}")
+        st.session_state["login_lock_msg"] = f"Too many failed attempts. Try again in {rem}."
+        return False
+
+    user = get_user(uk)
     if not user:
+        log_event("LOGIN_FAIL_NOUSER", actor_key=uk, target_key=uk, details="user_not_found")
         return False
 
     username, email, salt, pw_hash, _created_at, role = user
+
     if not verify_password(password, salt, pw_hash):
+        record_login_failure(uk)
+        log_event("LOGIN_FAIL_BADPASS", actor_key=uk, target_key=uk, details="bad_password")
         return False
 
+    record_login_success(uk)
+
     st.session_state["logged_in"] = True
-    st.session_state["unique_key"] = unique_key
+    st.session_state["unique_key"] = uk
     st.session_state["username"] = username
     st.session_state["email"] = email
     st.session_state["role"] = role
+
+    log_event("LOGIN_SUCCESS", actor_key=uk, target_key=uk, details=f"role={role}")
     return True
 
 
@@ -590,10 +713,10 @@ def init_states():
     st.session_state.setdefault("email", "")
     st.session_state.setdefault("role", "")
 
-    # Forgot password UI state
     st.session_state.setdefault("fp_open", False)
-    st.session_state.setdefault("fp_stage", None)  # None | "request" | "verify"
+    st.session_state.setdefault("fp_stage", None)
     st.session_state.setdefault("fp_userkey", "")
+    st.session_state.setdefault("clear_login_pw", False)
 
 
 # =========================================================
@@ -602,7 +725,7 @@ def init_states():
 st.set_page_config(page_title=f"{APP_NAME} — Demo", layout="wide")
 inject_ui_css()
 
-# Left panel logo (uses your path)
+# Left panel logo
 try:
     logo_b64 = img_to_base64("assets/linguanet_logo1.png")
     st.markdown(
@@ -614,7 +737,6 @@ try:
         unsafe_allow_html=True,
     )
 except Exception:
-    # If image missing, just skip
     pass
 
 ensure_admin_account()
@@ -622,12 +744,10 @@ init_states()
 
 open_center()
 
-# Header
 st.markdown(f"## {APP_NAME}")
 st.caption(TAGLINE)
 st.markdown('<div class="soft-divider"></div>', unsafe_allow_html=True)
 
-# Logged in banner
 if st.session_state["logged_in"]:
     st.info(
         f"Logged in as **{st.session_state['username']}** "
@@ -637,23 +757,33 @@ if st.session_state["logged_in"]:
         logout()
         st.rerun()
 
-# -------------------------
-# Landing: Login / Register
-# -------------------------
+
+# =========================================================
+# Landing: Login / Register (ONLY when not logged in)
+# =========================================================
 if not st.session_state["logged_in"]:
     st.markdown("### 🔐 Login / ✨ Register")
     st.markdown('<div class="soft-divider"></div>', unsafe_allow_html=True)
 
     tab_login, tab_register = st.tabs(["🔐 Login", "✨ Register (Enroll)"])
 
-    # =======================
-    # Login tab
-    # =======================
+    # -------------------------
+    # LOGIN TAB
+    # -------------------------
     with tab_login:
         st.markdown("#### Login Portal")
 
-        # Single login form ONLY (prevents duplicate form errors)
-        with st.form("login_form_main"):
+        # show lock message (if any)
+        msg = st.session_state.pop("login_lock_msg", None)
+        if msg:
+            st.warning(msg)
+
+        # ✅ clear password safely BEFORE widget is created
+        if st.session_state.get("clear_login_pw", False):
+            st.session_state["login_password"] = ""
+            st.session_state["clear_login_pw"] = False
+
+        with st.form("login_form_main", clear_on_submit=False):
             uk = st.text_input("Unique Key", key="login_unique_key")
             pw = st.text_input("Password", type="password", key="login_password")
 
@@ -663,23 +793,24 @@ if not st.session_state["logged_in"]:
             with b2:
                 forgot_clicked = st.form_submit_button("🔑 Forgot?")
 
-        # Forgot button opens Forgot panel
         if forgot_clicked:
             st.session_state["fp_open"] = True
             st.session_state["fp_stage"] = "request"
             st.session_state["fp_userkey"] = (uk or "").strip()
             st.rerun()
 
-        # Login action
         if login_clicked:
-            if login((uk or "").strip(), pw):
+            ok = login((uk or "").strip(), pw)
+            if ok:
                 st.success("Login successful ✅")
                 st.rerun()
             else:
                 st.error("Invalid unique key or password.")
+                st.session_state["clear_login_pw"] = True
+                st.rerun()
 
-        # Forgot Password UI (shown ONLY after click)
-        if st.session_state.get("fp_open"):
+        # Forgot UI (hidden until clicked)
+        if st.session_state.get("fp_open", False):
             st.markdown("---")
             st.markdown("### 🔑 Forgot Password")
 
@@ -707,14 +838,12 @@ if not st.session_state["logged_in"]:
                     st.session_state["fp_open"] = False
                     st.session_state["fp_stage"] = None
                     st.session_state["fp_userkey"] = ""
-                    for k in ["fp_code", "fp_new1", "fp_new2", "fp_userkey_input"]:
-                        if k in st.session_state:
-                            del st.session_state[k]
+                    for k in ["fp_userkey_input", "fp_code", "fp_new1", "fp_new2"]:
+                        st.session_state.pop(k, None)
                     st.rerun()
 
             if st.session_state.get("fp_stage") == "verify":
                 st.markdown("#### ✅ Enter code + set new password")
-
                 code_in = st.text_input("4-digit code", key="fp_code")
                 new_pw1 = st.text_input("New password", type="password", key="fp_new1")
                 new_pw2 = st.text_input("Confirm new password", type="password", key="fp_new2")
@@ -734,25 +863,25 @@ if not st.session_state["logged_in"]:
                         if verify_reset_code(uk2, code_in):
                             set_user_password(uk2, new_pw1)
                             clear_reset_code(uk2)
+                            log_event("PASSWORD_RESET_SUCCESS", actor_key=uk2, target_key=uk2, details="reset_completed")
 
                             st.success("✅ Password reset successful. Returning to login...")
 
-                            # ✅ Close forgot UI + return to landing login page
                             st.session_state["fp_open"] = False
                             st.session_state["fp_stage"] = None
                             st.session_state["fp_userkey"] = ""
-                            for k in ["fp_code", "fp_new1", "fp_new2", "fp_userkey_input"]:
-                                if k in st.session_state:
-                                    del st.session_state[k]
+                            for k in ["fp_userkey_input", "fp_code", "fp_new1", "fp_new2"]:
+                                st.session_state.pop(k, None)
 
                             logout()
                             st.rerun()
                         else:
+                            log_event("PASSWORD_RESET_FAIL", actor_key=uk2, target_key=uk2, details="invalid_or_expired_code")
                             st.error("Invalid/expired code (or too many tries).")
 
-    # =======================
-    # Register tab
-    # =======================
+    # -------------------------
+    # REGISTER TAB
+    # -------------------------
     with tab_register:
         st.markdown("#### Register / Enroll")
 
@@ -796,35 +925,70 @@ if not st.session_state["logged_in"]:
             elif not files or len(files) < 2:
                 st.error("Provide at least 2 enrollment images.")
             else:
-                create_user(uk, un, em, password, role="user")
-                saved_upload = save_uploaded_images(uk, files)
-                st.success(f"✅ User created. Saved **{saved_upload}** images.")
-
-                # Send confirmation email (optional)
                 try:
-                    send_email(
-                        to_email=em,
-                        subject="LinguaNet enrollment successful",
-                        body=(
-                            f"Hello {un},\n\n"
-                            f"Your LinguaNet account has been enrolled successfully.\n"
-                            f"Unique Key: {uk}\n\n"
-                            f"- LinguaNet"
-                        ),
-                    )
-                    st.success("📩 Enrollment email sent.")
+                    create_user(uk, un, em, password, role="user")
+                    saved_upload = save_uploaded_images(uk, files)
+
+                    # Build/store templates now (Phase 2)
+                    try:
+                        build_and_store_templates_for_user(uk)
+                        log_event("TEMPLATES_BUILT", actor_key=uk, target_key=uk, details="deep+handcrafted")
+                    except Exception as te:
+                        # Keep enrollment successful even if template build fails
+                        st.warning(f"User created, but template build failed: {te}")
+                        log_event("TEMPLATE_BUILD_FAIL", actor_key=uk, target_key=uk, details=str(te))
+
+                    log_event("USER_ENROLLED", actor_key=uk, target_key=uk, details=f"email={em}")
+                    st.success(f"✅ User created. Saved **{saved_upload}** images.")
+
+                    # Enrollment email (optional)
+                    try:
+                        send_email(
+                            to_email=em,
+                            subject="LinguaNet enrollment successful",
+                            body=(
+                                f"Hello {un},\n\n"
+                                f"Your LinguaNet account has been enrolled successfully.\n"
+                                f"Unique Key: {uk}\n\n"
+                                f"- LinguaNet"
+                            ),
+                        )
+                        st.success("📩 Enrollment email sent.")
+                    except Exception as e:
+                        st.warning(f"User created, but email failed: {e}")
+
                 except Exception as e:
-                    st.warning(f"User created, but email failed: {e}")
+                    st.error(f"Registration failed: {e}")
 
     close_center()
     st.stop()
 
-# -------------------------
+
+# =========================================================
 # After login
-# -------------------------
+# =========================================================
 role = st.session_state["role"]
 
 if role == "admin":
+    st.markdown("#### 📜 Audit Logs (latest)")
+    logs = get_audit_logs(limit=200)
+
+    if not logs:
+        st.info("No logs yet.")
+    else:
+        log_rows = []
+        for ts, evt, actor, target, details in logs:
+            log_rows.append(
+                {
+                    "Time": ts,
+                    "Event": evt,
+                    "Actor": actor or "",
+                    "Target": target or "",
+                    "Details": details or "",
+                }
+            )
+        st.dataframe(log_rows, use_container_width=True, hide_index=True)
+
     st.markdown('<div class="soft-divider"></div>', unsafe_allow_html=True)
     st.markdown("### 🛡️ Admin Dashboard")
     st.markdown('<div class="soft-divider"></div>', unsafe_allow_html=True)
@@ -877,7 +1041,13 @@ if role == "admin":
                     if st.button("🗑️ Delete", key=btn_key, disabled=not confirm):
                         try:
                             delete_user(uk)
-                            st.success(f"Deleted user `{uk}` and removed their enrolled images.")
+                            log_event(
+                                "ADMIN_DELETE_USER",
+                                actor_key=st.session_state.get("unique_key"),
+                                target_key=uk,
+                                details="deleted_user",
+                            )
+                            st.success(f"Deleted user `{uk}` and removed their enrolled images/templates.")
                             st.rerun()
                         except Exception as e:
                             st.error(f"Delete failed: {e}")
@@ -911,18 +1081,30 @@ if role == "admin":
             st.error("Provide a probe image.")
         else:
             scaler = build_global_scaler_for_enrolled() if mode == "Handcrafted (scaled)" else None
-            template = build_template(selected_user, mode, scaler=scaler)
-            probe = extract_probe_vector(img, mode, scaler=scaler)
 
+            template = load_template(selected_user, mode)
+            if template is None:
+                st.warning("No stored template found. Building now...")
+                template = build_template(selected_user, mode, scaler=scaler)
+                save_template(selected_user, mode, template)
+                log_event("TEMPLATE_AUTO_BUILT", actor_key=st.session_state.get("unique_key"), target_key=selected_user, details=f"mode={mode}")
+
+            probe = extract_probe_vector(img, mode, scaler=scaler)
             score = cosine_similarity(probe, template)
             decision = "ACCEPT ✅" if score >= threshold else "REJECT ❌"
+
+            log_event(
+                "ADMIN_VERIFY",
+                actor_key=st.session_state.get("unique_key"),
+                target_key=selected_user,
+                details=f"score={score:.4f};thr={threshold:.2f};mode={mode}",
+            )
 
             st.markdown("##### ✅ Result")
             st.write(f"**Score:** `{score:.4f}`  |  **Threshold:** `{threshold:.2f}`")
             st.write(f"**Decision:** {decision}")
 
 else:
-    st.markdown('<div class="soft-divider"></div>', unsafe_allow_html=True)
     st.markdown("### ✅ Verify (Logged-in User)")
     st.caption(f"User: {st.session_state['username']} • Key: `{st.session_state['unique_key']}`")
     st.markdown('<div class="soft-divider"></div>', unsafe_allow_html=True)
@@ -944,12 +1126,19 @@ else:
         else:
             uk = st.session_state["unique_key"]
             scaler = build_global_scaler_for_enrolled() if mode == "Handcrafted (scaled)" else None
-            template = build_template(uk, mode, scaler=scaler)
-            probe = extract_probe_vector(img, mode, scaler=scaler)
 
+            template = load_template(uk, mode)
+            if template is None:
+                st.warning("No stored template found. Building now...")
+                template = build_template(uk, mode, scaler=scaler)
+                save_template(uk, mode, template)
+                log_event("TEMPLATE_AUTO_BUILT", actor_key=uk, target_key=uk, details=f"mode={mode}")
+
+            probe = extract_probe_vector(img, mode, scaler=scaler)
             score = cosine_similarity(probe, template)
             decision = "ACCEPT ✅" if score >= threshold else "REJECT ❌"
 
+            log_event("USER_VERIFY", actor_key=uk, target_key=uk, details=f"score={score:.4f};thr={threshold:.2f};mode={mode}")
             st.markdown("##### ✅ Result")
             st.write(f"**Score:** `{score:.4f}`  |  **Threshold:** `{threshold:.2f}`")
             st.write(f"**Decision:** {decision}")
